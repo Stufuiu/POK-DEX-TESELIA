@@ -1,0 +1,79 @@
+name: Crear APK Pokemon Teselia
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compilar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar archivos del repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Preparar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Reconstruir proyecto original
+        shell: bash
+        run: |
+          python3 - <<'PYPROJECT'
+          from pathlib import Path
+          import hashlib, zipfile
+          chunks=sorted(Path('.').glob('teselia-proyecto.part[0-9][0-9]'))
+          if len(chunks)!=4:
+              raise SystemExit('Faltan partes. Deben subirse todas las 4 partes del proyecto.')
+          payload=b''.join(p.read_bytes() for p in chunks)
+          checksum=hashlib.sha256(payload).hexdigest()
+          if checksum!='470d26932aa3dcd0ca8ec316661575acce5d3e95984165093aa538a9159962a0':
+              raise SystemExit('El ZIP de fuentes no coincide con el original. Comprueba todas las partes.')
+          Path('teselia-proyecto.zip').write_bytes(payload)
+          with zipfile.ZipFile('teselia-proyecto.zip') as z:
+              for member in z.namelist():
+                  target=Path('proyecto')/member
+                  if not target.resolve().is_relative_to(Path('proyecto').resolve()):
+                      raise SystemExit('Nombre inseguro dentro del ZIP')
+              z.extractall('proyecto')
+          assert Path('proyecto/www/index.html').exists()
+          print('Proyecto completo: OK')
+          PYPROJECT
+
+      - name: Instalar dependencias y crear Android
+        working-directory: proyecto
+        shell: bash
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+          npx cap add android
+          npx cap sync android
+
+      - name: Preparar firma privada e iconos
+        working-directory: proyecto
+        env:
+          ANDROID_SIGNING_JSON: ${{ secrets.ANDROID_SIGNING_JSON }}
+        run: python3 scripts/prepare_android.py
+
+      - name: Compilar APK instalable
+        working-directory: proyecto/android
+        shell: bash
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Entregar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pokedex-Teselia-APK
+          path: proyecto/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
